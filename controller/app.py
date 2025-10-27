@@ -261,7 +261,11 @@ class Controller(OSKenApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         mod = parser.OFPFlowMod(
-            datapath=datapath, match=match, command=ofproto.OFPFC_DELETE
+            datapath=datapath,
+            match=match,
+            command=ofproto.OFPFC_DELETE,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
         )
         self.logger.info("Flow-Mod deleted from {}".format(dpid_to_str(datapath.id)))
         datapath.send_msg(mod)

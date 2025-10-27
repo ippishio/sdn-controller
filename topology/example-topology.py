@@ -4,13 +4,12 @@ from mininet.cli import CLI
 
 network = Mininet()
 
-s1 = network.addSwitch("s1", cls=OVSSwitch, dpid="1", protocols="OpenFlow15")
-s2 = network.addSwitch("s2", cls=OVSSwitch, dpid="2", protocols="OpenFlow15")
+s1 = network.addSwitch("s1", cls=OVSSwitch, dpid="1", protocols="OpenFlow13")
+s2 = network.addSwitch("s2", cls=OVSSwitch, dpid="2", protocols="OpenFlow13")
 br_ex = network.addSwitch(
     "br-ex",
     cls=OVSBridge,
     ip="10.0.0.254/24",
-    protocols="OpenFlow13",
     dpid=str(0x1234),
     controller=None,
 )
