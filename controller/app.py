@@ -100,6 +100,7 @@ class Controller(OSKenApp):
                 self.logger.error(
                     f"Captured method '{getattr(func, '__name__', 'Unknown')}' error, details: {str(e)}"
                 )
+                raise
             else:
                 self.resp_pipe_in.send({"rc": 0, "details": "OK"})
 
@@ -363,19 +364,21 @@ class Controller(OSKenApp):
         switch_backends = [
             k
             for k, _ in self.backend_mapping.items()
-            if self.backend_mapping[k]["sw_dpid"] == str(vip)
+            if self.backend_mapping[k]["sw_dpid"] == dpid_to_str(datapath.id)
         ]
+        self.logger.debug(f"backend_mapping: {self.backend_mapping}, vip: {str(vip)}")
+        self.logger.debug(f"backends: {switch_backends}")
         for h in switch_backends:
             match = parser.OFPMatch(
                 eth_type=0x0800,
                 ip_proto=protocol if protocol != Protocol.ip else None,
-                ipv4_src=h["ip"],
+                ipv4_src=h,
                 ipv4_dst=str(vip),
             )
             actions = [
                 parser.OFPActionSetField(ipv4_src=str(vip)),
                 parser.OFPActionSetField(eth_src=self.virtual_ip_map[str(vip)]["mac"]),
-                parser.OFPActionOutput(datapath.ofproto.OFPP_NORMAL),
+                parser.OFPActionOutput(port=self.backend_mapping[h]["port"]),
             ]
             self.add_flow(datapath, priority=3, match=match, actions=actions)
             self.logger.info(
