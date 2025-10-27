@@ -333,6 +333,7 @@ class Controller(OSKenApp):
             datapath=datapath,
             command=ofp.OFPGC_DELETE,
             group_id=group_id,
+            type_=0,
         )
         datapath.send_msg(group_mod_req)
         self.logger.info(
@@ -412,7 +413,6 @@ class Controller(OSKenApp):
         for dpid in hosts_grouped_by_switches.keys():
             datapath = self.switches[dpid]
             hosts = hosts_grouped_by_switches[dpid]
-            gid = self.__get_next_gid()
             self.add_balancing_group(datapath, hosts, rule.algorithm, gid)
             self.add_vip_to_group_flow(
                 datapath, rule.virtual_ip, hosts, rule.protocol, gid
@@ -451,6 +451,7 @@ class Controller(OSKenApp):
                 self.delete_flow(datapath, match)
             gid = self.virtual_ip_map[str(rule.virtual_ip)]["gid"]
             self.delete_group(datapath, gid)
+        self.virtual_ip_map.pop(str(rule.virtual_ip))
         self.logger.debug("deleted rule flows and groups")
 
     @staticmethod

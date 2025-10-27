@@ -23,9 +23,9 @@ async def create_rule(rule: BalanceRule):
 @router.delete("/{_id}")
 async def delete_rule(rule_id: str):
     logger.debug(f"deleting rule with id {rule_id}")
-    rule = BalanceRule.get_by_id(rule_id)
+    rule = BalanceRule.get_by_id(db, rule_id)
     controller.delete_balancing_rule(rule)
-    rule = BalanceRule.delete_by_id(rule_id, db)
+    rule = BalanceRule.delete_by_id(db, rule_id)
     if rule is None:
         raise HTTPException(404, "Rule not found")
     return rule_id

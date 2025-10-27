@@ -17,7 +17,7 @@ class BaseObject(BaseModel):
         db.mock_db[self.uid] = self  # почти ORM
         return self
 
-    def delete_by_id(_id: str, db: DatabaseHandler) -> Self:
+    def delete_by_id(db: DatabaseHandler, _id: str) -> Self:
         logger.debug(f"deleting {_id}, {db.mock_db}")
         return db.mock_db.pop(_id, None)
 
