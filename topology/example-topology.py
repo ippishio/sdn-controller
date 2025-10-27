@@ -24,7 +24,6 @@ c0 = network.addController(
     controller=RemoteController,
     ip="127.0.0.1",
     port=6653,
-    protocols="OpenFlow13",
 )
 network.addLink(s1, h1, 1, 1)
 network.addLink(s1, h2, 2, 1)

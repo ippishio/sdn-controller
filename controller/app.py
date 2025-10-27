@@ -154,10 +154,10 @@ class Controller(OSKenApp):
         if arp_pkt is not None:
             if (
                 arp_pkt.opcode == arp.ARP_REQUEST
-                and arp_pkt.dst_ip in self.virtual_ip_mac_map.keys()
+                and arp_pkt.dst_ip in self.virtual_ip_map.keys()
             ):
                 vip = arp_pkt.dst_ip
-                vmac = self.virtual_ip_mac_map[vip]
+                vmac = self.virtual_ip_map[vip]
                 self.logger.debug(f"found ARP request to VIP {vip}")
                 self._send_arp_reply(datapath, in_port, arp_pkt, vip, vmac)
                 return
