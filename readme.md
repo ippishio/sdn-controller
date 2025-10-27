@@ -9,6 +9,7 @@
 ```bash
 user@ubuntu:~/sdn-controller$ pip3 install -r requirements.txt
 ```
+
 ### Запуск **mininet**
 Необходимо настроенное `mininet` окружение. В моем случае это был подготовленный образ VM с репозитория `mininet` на домашнем сервере.
 ```bash

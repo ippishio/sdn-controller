@@ -1,6 +1,7 @@
 import logging
 import traceback
 import sys
+import functools
 import random
 import multiprocessing as mp
 from os_ken.base.app_manager import OSKenApp
@@ -71,20 +72,38 @@ class Controller(OSKenApp):
         # запускаем в отдельном процессе FastAPI
         # чтобы не конфликтовали потоки
         self.logger.info("Started API endpoint")
-        parent_conn, child_conn = mp.Pipe()
-        p = mp.Process(target=run_api, args=(child_conn,))
+        self.req_pipe_in, self.req_pipe_out = mp.Pipe()
+        self.resp_pipe_in, self.resp_pipe_out = mp.Pipe()
+        p = mp.Process(target=run_api, args=(self.req_pipe_in, self.resp_pipe_out))
         p.start()
-        hub.spawn(self._api_listener, parent_conn)
+        hub.spawn(self._api_listener)
 
-    def _api_listener(self, pipe):
+    def _api_listener(self):
         # самопальный RPC
+        pipe_in = self.req_pipe_out
         while True:
-            req = pipe.recv()
+            req = pipe_in.recv()
             if req:
                 self.logger.debug(f"new requet {str(req)}")
                 method = getattr(self, req["method"])
                 method(*req["args"], **req["kwargs"])
                 req = None
+
+    def _send_exception(func):
+
+        @functools.wraps(func)
+        def handler(self, *args, **kwargs):
+            try:
+                func(self, *args, **kwargs)
+            except Exception as e:
+                self.resp_pipe_in.send({"rc": 1, "details": str(e)})
+                self.logger.error(
+                    f"Captured method '{getattr(func, '__name__', 'Unknown')}' error, details: {str(e)}"
+                )
+            else:
+                self.resp_pipe_in.send({"rc": 0, "details": "OK"})
+
+        return handler
 
     @set_ev_cls(
         ofp_event.EventOFPErrorMsg,
@@ -144,6 +163,7 @@ class Controller(OSKenApp):
                 return
         # собственно mac-learning
         if eth_header.src not in self.datapath_mac_table[dpid_to_str(datapath.id)]:
+            # обработать
             self.datapath_mac_table[dpid_to_str(datapath.id)][eth_header.src] = in_port
             self.add_flow(
                 datapath,
@@ -357,16 +377,23 @@ class Controller(OSKenApp):
                 f"added vip return flow from host to dpid {dpid_to_str(datapath.id)}"
             )
 
+    @_send_exception
     def apply_balancing_rule(self, rule: BalanceRule):
         # парсим объект правила и делаем все необходимое
+        for ip in rule.backend_ip:
+            if str(ip) not in self.backend_mapping.keys():
+                raise ValueError(f"Backend IP {str(ip)} not in the network")
+        if rule.virtual_ip in self.backend_mapping.keys():
+            raise ValueError(f"Can't assign Virtual IP {str(ip)}: host already exists")
+        if rule.port is not None and (rule.port < 0 or rule.port > 65535):
+            raise ValueError(f"Incorrect port {rule.port}")
         hosts_grouped_by_switches = {}
         gid = self.__get_next_gid()
         if str(rule.virtual_ip) not in self.virtual_ip_map.keys():
-            self.virtual_ip_map[str(rule.virtual_ip)] = {}
-            self.virtual_ip_map[str(rule.virtual_ip)][
-                "mac"
-            ] = Controller._generate_mac()
-            self.virtual_ip_map[str(rule.virtual_ip)]["gid"] = gid
+            self.virtual_ip_map[str(rule.virtual_ip)] = {
+                "mac": Controller._generate_mac(),
+                "gid": gid,
+            }
         else:
             raise ValueError(f"Virtual IP {rule.virtual_ip} already aquired")
         for ip in rule.backend_ip:
@@ -388,9 +415,8 @@ class Controller(OSKenApp):
             )
         self.logger.debug("added FUCKIng rule hope it is FUCKING works")
 
+    @_send_exception
     def delete_balancing_rule(self, rule: BalanceRule):
-        #
-
         hosts_grouped_by_switches = {}
         for ip in rule.backend_ip:
             dpid = self.backend_mapping[str(ip)]["sw_dpid"]
@@ -402,7 +428,6 @@ class Controller(OSKenApp):
                 {"ip": ip, "port": sw_port, "mac": mac}
             )
         for dpid in hosts_grouped_by_switches.keys():
-
             datapath = self.switches[dpid]
             parser = datapath.ofproto_parser
             match = parser.OFPMatch(

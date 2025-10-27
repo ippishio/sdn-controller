@@ -15,18 +15,19 @@ router = APIRouter(prefix="/rules")
 @router.post("/")
 async def create_rule(rule: BalanceRule):
     logger.debug(f"creating rule with id {rule.uid}")
-    rule.save(db)
     controller.apply_balancing_rule(rule)
+    rule.save(db)
     return rule
 
 
 @router.delete("/{_id}")
 async def delete_rule(rule_id: str):
     logger.debug(f"deleting rule with id {rule_id}")
+    rule = BalanceRule.get_by_id(rule_id)
+    controller.delete_balancing_rule(rule)
     rule = BalanceRule.delete_by_id(rule_id, db)
     if rule is None:
         raise HTTPException(404, "Rule not found")
-    controller.delete_balancing_rule(rule)
     return rule_id
 
 
@@ -38,6 +39,8 @@ async def get_all_rules():
 
 @router.put("/{_id}")
 async def update_rule(rule_id: str, new_rule: BalanceRule):
+    # not working
+    return
     logger.debug(f"updating rule with id {rule_id}, new_data: {str(new_rule)}")
     old_rule = BalanceRule.get_by_id(rule_id)
     if old_rule is None:
