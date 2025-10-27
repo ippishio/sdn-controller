@@ -157,7 +157,7 @@ class Controller(OSKenApp):
                 and arp_pkt.dst_ip in self.virtual_ip_map.keys()
             ):
                 vip = arp_pkt.dst_ip
-                vmac = self.virtual_ip_map[vip]
+                vmac = self.virtual_ip_map[vip]["mac"]
                 self.logger.debug(f"found ARP request to VIP {vip}")
                 self._send_arp_reply(datapath, in_port, arp_pkt, vip, vmac)
                 return
@@ -360,7 +360,12 @@ class Controller(OSKenApp):
         self.logger.info(
             f"added group flow with id {group_id} to dpid {dpid_to_str(datapath.id)} with VIP {str(vip)}"
         )
-        for h in backends:
+        switch_backends = [
+            k
+            for k, _ in self.backend_mapping.items()
+            if self.backend_mapping[k]["sw_dpid"] == str(vip)
+        ]
+        for h in switch_backends:
             match = parser.OFPMatch(
                 eth_type=0x0800,
                 ip_proto=protocol if protocol != Protocol.ip else None,
@@ -368,14 +373,9 @@ class Controller(OSKenApp):
                 ipv4_dst=str(vip),
             )
             actions = [
-                # parser.NXActionRegMove(
-                #    src_field="reg0",
-                #    dst_field="ipv4_dst",
-                #    n_bits=32,
-                # ),
                 parser.OFPActionSetField(ipv4_src=str(vip)),
                 parser.OFPActionSetField(eth_src=self.virtual_ip_map[str(vip)]["mac"]),
-                # parser.OFPActionOutput(datapath.ofproto.OFPP_NORMAL),
+                parser.OFPActionOutput(datapath.ofproto.OFPP_NORMAL),
             ]
             self.add_flow(datapath, priority=3, match=match, actions=actions)
             self.logger.info(
