@@ -23,7 +23,7 @@ v2 = network.addHost("v2", ip="10.0.0.4/24", mac="00:00:00:00:00:04")
 c0 = network.addController(
     "c0",
     controller=RemoteController,
-    ip="192.168.3.181",
+    ip="127.0.0.1",
     port=6653,
     protocols="OpenFlow13",
 )
