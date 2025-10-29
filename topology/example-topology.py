@@ -4,8 +4,8 @@ from mininet.cli import CLI
 
 network = Mininet()
 
-s1 = network.addSwitch("s1", cls=OVSSwitch, dpid="1", protocols="OpenFlow13")
-s2 = network.addSwitch("s2", cls=OVSSwitch, dpid="2", protocols="OpenFlow13")
+s1 = network.addSwitch("s1", cls=OVSSwitch, dpid="1", protocols="OpenFlow15")
+s2 = network.addSwitch("s2", cls=OVSSwitch, dpid="2", protocols="OpenFlow15")
 br_ex = network.addSwitch(
     "br-ex",
     cls=OVSBridge,
@@ -22,7 +22,7 @@ v2 = network.addHost("v2", ip="10.0.0.4/24", mac="00:00:00:00:00:04")
 c0 = network.addController(
     "c0",
     controller=RemoteController,
-    ip="127.0.0.1",
+    ip="192.168.3.185",
     port=6653,
 )
 network.addLink(s1, h1, 1, 1)

@@ -12,7 +12,7 @@ from os_ken.controller.handler import (
     set_ev_cls,
     HANDSHAKE_DISPATCHER,
 )
-from os_ken.ofproto import ofproto_v1_3
+from os_ken.ofproto import ofproto_v1_5
 from os_ken.lib.packet import packet
 from os_ken.lib.dpid import dpid_to_str
 from os_ken.lib.packet import ethernet, arp
@@ -26,7 +26,7 @@ from controller.api.app import run_api
 
 class Controller(OSKenApp):
 
-    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    OFP_VERSIONS = [ofproto_v1_5.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
         self.cur_gid = 1  # некая гарантия уникальности group_id
@@ -97,10 +97,9 @@ class Controller(OSKenApp):
                 func(self, *args, **kwargs)
             except Exception as e:
                 self.resp_pipe_in.send({"rc": 1, "details": str(e)})
-                self.logger.error(
-                    f"Captured method '{getattr(func, '__name__', 'Unknown')}' error, details: {str(e)}"
+                self.logger.exception(
+                    f"Captured method '{getattr(func, '__name__', 'Unknown')}' error"
                 )
-                raise
             else:
                 self.resp_pipe_in.send({"rc": 0, "details": "OK"})
 
@@ -271,31 +270,6 @@ class Controller(OSKenApp):
         self.logger.info("Flow-Mod deleted from {}".format(dpid_to_str(datapath.id)))
         datapath.send_msg(mod)
 
-    def nicira_add_algorithm_to_group(
-        self, datapath, group_id, algorithm: BalanceAlgroithm
-    ):
-        # не сработало :(
-        NX_EXPERIMENTER_ID = 0x00002320
-
-        data = bytearray()
-        data.extend(struct.pack("!H", 44))  # NXAST_GROUP_SET_ALGORITHM
-        data.extend(struct.pack("!H", 8))  # length
-        data.extend(struct.pack("!I", group_id))  # group_id
-        data.extend(struct.pack("!H", algorithm))  # algorithm
-        data.extend(b"\x00\x00")  # padding
-
-        experimenter_msg = datapath.ofproto_parser.OFPExperimenter(
-            datapath=datapath,
-            experimenter=NX_EXPERIMENTER_ID,
-            exp_type=60000,
-            data=bytes(data),
-        )
-
-        datapath.send_msg(experimenter_msg)
-        self.logger.info(
-            f"added nicira algorithm '{algorithm}' to group {group_id} on dpid {dpid_to_str(datapath.id)}"
-        )
-
     def add_balancing_group(
         self, datapath, backends, algorithm: BalanceAlgroithm, group_id
     ):
@@ -342,48 +316,57 @@ class Controller(OSKenApp):
         )
 
     def add_vip_to_group_flow(
-        self, datapath, vip: IPv4Address, backends, protocol: Protocol, group_id
+        self, datapath, vip: IPv4Address, protocol: Protocol, group_id
     ):
-        # не получилось реализовать подмену src_ip при в ответных пакетах
-        # пробовал - писать в метадата, в регистры (в комментах) - в ответных пакетавх этой инфы уже нет
-        # conntrack - банально уперся в отсутствие документации, метод тыка не сработал до конца
-        # мои попытки с conntrack в файле stash в корне репозитория
         parser = datapath.ofproto_parser
         match = parser.OFPMatch(
             eth_type=0x0800,
             ipv4_dst=str(vip),
             ip_proto=protocol if protocol != Protocol.ip else None,
+            ct_state=(0x00, 0x01),
+            ct_zone=0,
         )
         actions = [
+            parser.NXActionCT(
+                flags=0x01,  # NX_CT_F_COMMIT
+                zone_src=0,
+                zone_ofs_nbits=0,
+                recirc_table=0,
+                alg=0,
+                actions=[parser.OFPActionGroup(group_id=group_id)],
+            ),
             parser.OFPActionGroup(group_id=group_id),
         ]
         self.add_flow(datapath, priority=2, match=match, actions=actions)
         self.logger.info(
             f"added group flow with id {group_id} to dpid {dpid_to_str(datapath.id)} with VIP {str(vip)}"
         )
-        switch_backends = [
-            k
-            for k, _ in self.backend_mapping.items()
-            if self.backend_mapping[k]["sw_dpid"] == dpid_to_str(datapath.id)
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ip_proto=protocol if protocol != Protocol.ip else None,
+            ct_state=0x06,  # +est+rpl
+            ipv4_dst=str(vip),
+        )
+        actions = [
+            parser.NXActionCT(
+                flags=0x01,
+                zone_src=0,
+                zone_ofs_nbits=0,
+                recirc_table=0,
+                alg=0,
+                actions=[
+                    parser.NXActionNAT(
+                        flags=0x01,
+                        range_ipv4_min=str(vip),
+                        range_ipv4_max=str(vip),
+                    )
+                ],
+            ),
         ]
-        self.logger.debug(f"backend_mapping: {self.backend_mapping}, vip: {str(vip)}")
-        self.logger.debug(f"backends: {switch_backends}")
-        for h in switch_backends:
-            match = parser.OFPMatch(
-                eth_type=0x0800,
-                ip_proto=protocol if protocol != Protocol.ip else None,
-                ipv4_src=h,
-                ipv4_dst=str(vip),
-            )
-            actions = [
-                parser.OFPActionSetField(ipv4_src=str(vip)),
-                parser.OFPActionSetField(eth_src=self.virtual_ip_map[str(vip)]["mac"]),
-                parser.OFPActionOutput(port=self.backend_mapping[h]["port"]),
-            ]
-            self.add_flow(datapath, priority=3, match=match, actions=actions)
-            self.logger.info(
-                f"added vip return flow from host to dpid {dpid_to_str(datapath.id)}"
-            )
+        self.add_flow(datapath, priority=3, match=match, actions=actions)
+        self.logger.info(
+            f"added vip return flow from host to dpid {dpid_to_str(datapath.id)}"
+        )
 
     @_send_exception
     def apply_balancing_rule(self, rule: BalanceRule):
@@ -398,7 +381,7 @@ class Controller(OSKenApp):
         hosts_grouped_by_switches = {}
         gid = self.__get_next_gid()
         if str(rule.virtual_ip) not in self.virtual_ip_map.keys():
-            self.virtual_ip_map[str(rule.virtual_ip)] = {
+            vip_mapping = {
                 "mac": Controller._generate_mac(),
                 "gid": gid,
             }
@@ -420,6 +403,7 @@ class Controller(OSKenApp):
             self.add_vip_to_group_flow(
                 datapath, rule.virtual_ip, hosts, rule.protocol, gid
             )
+        self.virtual_ip_map[str(rule.virtual_ip)] = vip_mapping
         self.logger.debug("added FUCKIng rule hope it is FUCKING works")
 
     @_send_exception
