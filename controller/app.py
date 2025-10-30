@@ -314,6 +314,28 @@ class Controller(OSKenApp):
             f"deleted group {group_id} from dpid {dpid_to_str(datapath.id)}"
         )
 
+    def add_vmac_to_group_flow(self, datapath, vmac: str, group_id):
+        parser = datapath.ofproto_parser
+        other_datapath = next(v for k, v in self.switches.items() if k != dpid_to_str(datapath.id))
+        self.add_flow(
+            datapath,
+            1,
+            match=parser.OFPMatch(eth_dst=vmac),
+            actions=[parser.OFPActionGroup(group_id)],
+        )
+        self.logger.debug(
+            f"new flow: vmac {vmac} to group {group_id} on dpid {dpid_to_str(datapath.id)}"
+        )
+        self.add_flow(
+            other_datapath,
+            1,
+            match=other_datapath.ofproto_parser.OFPMatch(eth_dst=vmac),
+            actions=[other_datapath.ofproto_parser.OFPActionOutput(port=3)],
+        )
+        self.logger.debug(
+            f"new flow: vmac {vmac} to port 3 (other switch) on dpid {dpid_to_str(other_datapath.id)}"
+        )
+
     def add_vip_to_group_flow(
         self, datapath, vip: IPv4Address, protocol: Protocol, group_id
     ):
@@ -424,6 +446,7 @@ class Controller(OSKenApp):
             hosts = hosts_grouped_by_switches[dpid]
             self.add_balancing_group(datapath, hosts, rule.algorithm, gid)
             self.add_vip_to_group_flow(datapath, rule.virtual_ip, rule.protocol, gid)
+            self.add_vmac_to_group_flow(datapath, vip_mapping["mac"], gid)
         self.virtual_ip_map[str(rule.virtual_ip)] = vip_mapping
         self.logger.debug("added FUCKIng rule hope it is FUCKING works")
 
