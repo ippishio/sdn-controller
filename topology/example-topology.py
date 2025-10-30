@@ -4,8 +4,8 @@ from mininet.cli import CLI
 
 network = Mininet()
 
-s1 = network.addSwitch("s1", cls=OVSSwitch, dpid="1", protocols="OpenFlow15")
-s2 = network.addSwitch("s2", cls=OVSSwitch, dpid="2", protocols="OpenFlow15")
+s1 = network.addSwitch("s1", cls=OVSSwitch, dpid="0000000000000001")
+s2 = network.addSwitch("s2", cls=OVSSwitch, dpid="0000000000000002")
 br_ex = network.addSwitch(
     "br-ex",
     cls=OVSBridge,
@@ -31,7 +31,7 @@ network.addLink(s2, v1, 1, 1)
 network.addLink(s2, v2, 2, 1)
 network.addLink(br_ex, s1, 1, 3)
 network.addLink(br_ex, s2, 2, 3)
-
 network.start()
+print(network.get('s1').ports)
 CLI(network)
 network.stop()

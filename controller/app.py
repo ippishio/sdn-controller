@@ -1,6 +1,6 @@
 import logging
-import traceback
-import sys
+import binascii
+import socket
 import functools
 import random
 import multiprocessing as mp
@@ -12,12 +12,13 @@ from os_ken.controller.handler import (
     set_ev_cls,
     HANDSHAKE_DISPATCHER,
 )
-from os_ken.ofproto import ofproto_v1_5
+from os_ken.ofproto import ofproto_v1_3
 from os_ken.lib.packet import packet
 from os_ken.lib.dpid import dpid_to_str
-from os_ken.lib.packet import ethernet, arp
+from os_ken.lib.packet import ethernet, arp, ipv4
 from os_ken.lib.packet.packet_utils import struct
 from os_ken.lib import hub
+from os_ken import utils
 from ipaddress import IPv4Address
 
 from controller.db.models import BalanceRule, BalanceAlgroithm, Protocol
@@ -26,7 +27,7 @@ from controller.api.app import run_api
 
 class Controller(OSKenApp):
 
-    OFP_VERSIONS = [ofproto_v1_5.OFP_VERSION]
+    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
         self.cur_gid = 1  # некая гарантия уникальности group_id
@@ -113,8 +114,8 @@ class Controller(OSKenApp):
         # отлов ошибок
         error = ev.msg.datapath.ofproto.ofp_error_to_jsondict(ev.msg.type, ev.msg.code)
         self.logger.error(
-            "openflow error received:\n\t\ttype={}\n\t\tcode={}".format(
-                error.get("type"), error.get("code")
+            "openflow error received:\n\t\ttype={}\n\t\tcode={}\n\t\tdata={}".format(
+                error.get("type"), error.get("code"), ev.msg.data
             )
         )
 
@@ -148,7 +149,14 @@ class Controller(OSKenApp):
         self.logger.debug(
             "❗️event 'packet in' from datapath: {}".format(dpid_to_str(datapath.id))
         )
+        self.logger.debug(f"mac mapping: {self.datapath_mac_table}")
         pkt = packet.Packet(msg.data)
+        ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
+        if ipv4_pkt is not None:
+            self.logger.debug(f"IPv4 packet source: {ipv4_pkt.src}, destination: {ipv4_pkt.dst}")
+            if ipv4_pkt.src == "10.0.0.1":
+                self.logger.debug(f"!!packet message from 10.0.0.1: {ev.msg}")
+                self.logger.debug(f"!!packet message match 10.0.0.1: {ev.msg.match}")
         arp_pkt = pkt.get_protocol(arp.arp)
         #  ответ ARP запрос для VIP
         if arp_pkt is not None:
@@ -160,39 +168,29 @@ class Controller(OSKenApp):
                 vmac = self.virtual_ip_map[vip]["mac"]
                 self.logger.debug(f"found ARP request to VIP {vip}")
                 self._send_arp_reply(datapath, in_port, arp_pkt, vip, vmac)
-                return
         # собственно mac-learning
-        if eth_header.src not in self.datapath_mac_table[dpid_to_str(datapath.id)]:
-            # обработать
+        actions = [datapath.ofproto_parser.OFPActionOutput(datapath.ofproto.OFPP_FLOOD)]  # default
+        if eth_header is not None:
+            self.logger.debug(f"Ethernet header source: {eth_header.src}, destination: {eth_header.dst}")
             self.datapath_mac_table[dpid_to_str(datapath.id)][eth_header.src] = in_port
-            self.add_flow(
-                datapath,
-                1,
-                match=parser.OFPMatch(eth_dst=eth_header.src),
-                actions=[parser.OFPActionOutput(port=in_port)],
-            )
-            self.logger.debug(
-                f"new flow: mac {eth_header.src} to port {in_port} on dpid {dpid_to_str(datapath.id)}"
-            )
-        if eth_header.dst in self.datapath_mac_table[dpid_to_str(datapath.id)]:
-            out_port = self.datapath_mac_table[dpid_to_str(datapath.id)][eth_header.dst]
-            actions = [datapath.ofproto_parser.OFPActionOutput(out_port)]
-            self.logger.info(
-                f"forwarding packet with dst_mac {eth_header.dst} to port {out_port} on dpid {dpid_to_str(datapath.id)}"
-            )
-        else:
-            actions = [datapath.ofproto_parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-            if eth_header.dst != "ff:ff:ff:ff:ff:ff":
-                self.logger.info(
-                    f"unknown dst_mac {eth_header.dst} on dpid {dpid_to_str(datapath.id)}, flooding"
+            if eth_header.dst in self.datapath_mac_table[dpid_to_str(datapath.id)].keys():
+                # обработать
+                out_port = self.datapath_mac_table[dpid_to_str(datapath.id)][eth_header.dst]
+                self.add_flow(
+                    datapath,
+                    1,
+                    match=parser.OFPMatch(eth_dst=eth_header.dst),
+                    actions=[parser.OFPActionOutput(port=out_port)],
                 )
-        data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+                self.logger.debug(
+                    f"new flow: mac {eth_header.dst} to port {out_port} on dpid {dpid_to_str(datapath.id)}"
+                )
         out = parser.OFPPacketOut(
             datapath=datapath,
             buffer_id=msg.buffer_id,
             in_port=in_port,
             actions=actions,
-            data=data,
+            data=msg.data,
         )
         self.logger.info("Sending packet out")
         datapath.send_msg(out)
@@ -242,13 +240,14 @@ class Controller(OSKenApp):
         self.cur_gid += 1
         return self.cur_gid
 
-    def add_flow(self, datapath, priority, match, actions, idle=600, hard=0):
+    def add_flow(self, datapath, priority, match, actions, table=0, idle=0, hard=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(
             datapath=datapath,
             priority=priority,
+            table_id=table,
             match=match,
             instructions=inst,
             idle_timeout=idle,
@@ -323,37 +322,61 @@ class Controller(OSKenApp):
             eth_type=0x0800,
             ipv4_dst=str(vip),
             ip_proto=protocol if protocol != Protocol.ip else None,
-            ct_state=(0x00, 0x01),
+            ct_state=(0x00, 0x20),  # -trk
             ct_zone=0,
         )
         actions = [
             parser.NXActionCT(
                 flags=0x01,  # NX_CT_F_COMMIT
-                zone_src=0,
+                zone_src=None,
                 zone_ofs_nbits=0,
                 recirc_table=0,
                 alg=0,
-                actions=[parser.OFPActionGroup(group_id=group_id)],
+                actions=[],
             ),
-            parser.OFPActionGroup(group_id=group_id),
         ]
         self.add_flow(datapath, priority=2, match=match, actions=actions)
+
         self.logger.info(
             f"added group flow with id {group_id} to dpid {dpid_to_str(datapath.id)} with VIP {str(vip)}"
         )
         match = parser.OFPMatch(
             eth_type=0x0800,
-            ip_proto=protocol if protocol != Protocol.ip else None,
-            ct_state=0x06,  # +est+rpl
             ipv4_dst=str(vip),
+            ip_proto=protocol if protocol != Protocol.ip else None,
+            ct_state=(0x20, 0x20),  # +trk
+            ct_zone=0,
+        )
+        actions = [
+            parser.OFPActionGroup(group_id=group_id),
+        ]
+        self.add_flow(datapath, priority=2, match=match, actions=actions)
+
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src="10.0.0.1",
+            ip_proto=protocol if protocol != Protocol.ip else None,
+        )
+        ofproto = parser.ofproto
+        actions = [
+            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)
+        ]
+        self.add_flow(datapath, priority=20, match=match, actions=actions)
+        self.logger.info(
+            f"added conntrack intercept group flow with id {group_id} to dpid {dpid_to_str(datapath.id)} with VIP {str(vip)}"
+        )
+        match = parser.OFPMatch(
+            eth_type=0x0800,
+            ip_proto=protocol if protocol != Protocol.ip else None,
+            ct_state=(0x02 | 0x08, 0x02 | 0x08),  # +est+rpl
         )
         actions = [
             parser.NXActionCT(
                 flags=0x01,
-                zone_src=0,
+                zone_src=None,
                 zone_ofs_nbits=0,
-                recirc_table=0,
                 alg=0,
+                recirc_table=0,
                 actions=[
                     parser.NXActionNAT(
                         flags=0x01,
@@ -394,15 +417,13 @@ class Controller(OSKenApp):
             if dpid not in hosts_grouped_by_switches:
                 hosts_grouped_by_switches[dpid] = []
             hosts_grouped_by_switches[dpid].append(
-                {"ip": ip, "port": sw_port, "mac": mac}
+                {"ip": str(ip), "port": sw_port, "mac": mac}
             )
         for dpid in hosts_grouped_by_switches.keys():
             datapath = self.switches[dpid]
             hosts = hosts_grouped_by_switches[dpid]
             self.add_balancing_group(datapath, hosts, rule.algorithm, gid)
-            self.add_vip_to_group_flow(
-                datapath, rule.virtual_ip, hosts, rule.protocol, gid
-            )
+            self.add_vip_to_group_flow(datapath, rule.virtual_ip, rule.protocol, gid)
         self.virtual_ip_map[str(rule.virtual_ip)] = vip_mapping
         self.logger.debug("added FUCKIng rule hope it is FUCKING works")
 
@@ -448,3 +469,20 @@ class Controller(OSKenApp):
             hex_octet = f"{random.randint(0, 255):02x}"
             mac_parts.append(hex_octet)
         return ":".join(mac_parts)
+
+    @staticmethod
+    def ip_to_int(ip_str):
+        """Convert IP string to integer"""
+        return struct.unpack("!I", socket.inet_aton(ip_str))[0]
+
+    @staticmethod
+    def mac_to_int(mac_str):
+        """
+        Convert MAC address string to integer
+        Example: "00:00:00:00:00:01" -> 1
+        """
+        # Remove any separators
+        mac_clean = mac_str.replace(":", "").replace("-", "")
+
+        # Convert to integer (base 16)
+        return int(mac_clean, 16)
